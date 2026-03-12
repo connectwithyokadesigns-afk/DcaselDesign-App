@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- App cache — used by shareImage() -->
+    <cache-path name="shared_cache" path="shared/" />
+    <!-- App internal files -->
+    <files-path name="app_files" path="." />
+    <!-- External files dir (app-specific, no permission needed) -->
+    <external-files-path name="external_files" path="." />
+    <!-- FIX: Full external storage path — required for legacy save on Android 7–9 -->
+    <external-path name="external_storage" path="." />
+</paths>
