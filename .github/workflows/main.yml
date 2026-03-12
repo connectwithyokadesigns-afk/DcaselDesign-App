@@ -1,0 +1,147 @@
+name: Build Dcasel APK
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build type'
+        required: false
+        default: 'debug'
+        type: choice
+        options: [ debug, release ]
+
+# Required so GITHUB_TOKEN can create Releases (fixes 403 error)
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ── 1. Checkout ────────────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── 2. Java 17 (matches compileOptions in app/build.gradle) ────
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      # ── 3. Bootstrap Gradle wrapper jar if missing ─────────────────
+      - name: Bootstrap Gradle wrapper jar
+        run: |
+          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
+            echo "gradle-wrapper.jar missing — downloading..."
+            mkdir -p gradle/wrapper
+            curl -sL \
+              "https://raw.githubusercontent.com/gradle/gradle/v8.6.0/gradle/wrapper/gradle-wrapper.jar" \
+              -o gradle/wrapper/gradle-wrapper.jar
+            echo "Downloaded gradle-wrapper.jar"
+          else
+            echo "gradle-wrapper.jar already present"
+          fi
+
+      # ── 4. Permissions & validation ────────────────────────────────
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v3
+
+      # ── 5a. Build DEBUG APK ────────────────────────────────────────
+      - name: Build Debug APK
+        if: github.event.inputs.build_type != 'release'
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+        env:
+          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8"
+
+      # ── 5b. Decode keystore for release ───────────────────────────
+      - name: Decode keystore
+        if: github.event.inputs.build_type == 'release'
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 --decode > keystore.jks
+            echo "Keystore decoded successfully."
+          else
+            echo "No KEYSTORE_BASE64 secret found — will use debug signing."
+          fi
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+
+      # ── 5c. Build RELEASE APK ──────────────────────────────────────
+      - name: Build Release APK
+        if: github.event.inputs.build_type == 'release'
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+        env:
+          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8"
+          KEYSTORE_FILE:     ${{ github.workspace }}/keystore.jks
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS:         ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD:      ${{ secrets.KEY_PASSWORD }}
+
+      # ── 6. Locate the built APK ────────────────────────────────────
+      - name: Locate APK
+        id: apk
+        run: |
+          APK=$(find app/build/outputs/apk -name "*.apk" | head -1)
+          if [ -z "$APK" ]; then
+            echo "ERROR: No APK found!"
+            find app/build/outputs/ || true
+            exit 1
+          fi
+          echo "path=$APK"             >> $GITHUB_OUTPUT
+          echo "name=$(basename $APK)" >> $GITHUB_OUTPUT
+          echo "Found: $APK"
+
+      # ── 7. Upload APK as workflow artifact ─────────────────────────
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Dcasel-${{ github.event.inputs.build_type || 'debug' }}-apk-${{ github.run_number }}
+          path: ${{ steps.apk.outputs.path }}
+          retention-days: 30
+          if-no-files-found: error
+
+      # ── 8. Create GitHub Release (push to main/master only) ────────
+      - name: Create GitHub Release
+        if: |
+          (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') &&
+          github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: "Dcasel Design v${{ github.run_number }}"
+          files: ${{ steps.apk.outputs.path }}
+          body: |
+            ## Dcasel Design v${{ github.run_number }}
+
+            Auto-built APK from commit `${{ github.sha }}`.
+
+            ### Install on Android
+            1. Download the `.apk` file below
+            2. On your phone: **Settings → Install unknown apps** → enable for your browser
+            3. Open the downloaded file and tap **Install**
+
+            ### Build info
+            | Field | Value |
+            |-------|-------|
+            | Commit | `${{ github.sha }}` |
+            | Branch | `${{ github.ref_name }}` |
+            | Build  | `#${{ github.run_number }}` |
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
